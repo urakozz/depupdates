@@ -130,6 +130,9 @@ func getTags(v rawProject) (versions, error) {
 	local, _ := ioutil.TempDir("", "go-vcs")
 	defer os.RemoveAll(local)
 	repo, err := getRepo(local, remote, httpsRemote)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get repo: %s", err)
+	}
 	tags, err := repo.Tags()
 	if err != nil {
 		return nil, fmt.Errorf("unable to get tags: %s", err)
