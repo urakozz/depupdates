@@ -24,7 +24,12 @@
 #   go-tests = true
 #   unused-packages = true
 
-
+[[constraint]]
+  name = "cloud.google.com/go"
+  version = "^0.21.0"
+[[constraint]]
+  name = "google.golang.org/grpc"
+  version = "^1.11.3"
 [[constraint]]
   name = "github.com/golang/dep"
   version = "0.4.1"

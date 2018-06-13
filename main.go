@@ -3,18 +3,25 @@ package main
 import (
 	"fmt"
 	"io/ioutil"
+	"net/http"
 	"net/url"
 	"os"
 	"sort"
 	"strings"
 	"sync"
+	"time"
+
+	xhttp "golang.org/x/net/html"
 
 	"github.com/Masterminds/semver"
 	"github.com/Masterminds/vcs"
 	"github.com/pelletier/go-toml"
 )
 
+// ManifestLockFile ...
 const ManifestLockFile = "Gopkg.lock"
+
+// ManifestFile ...
 const ManifestFile = "Gopkg.toml"
 
 type rawManifest struct {
@@ -39,6 +46,8 @@ type update struct {
 }
 
 func main() {
+	//os.Setenv("GIT_SSH_COMMAND", "ssh")
+	//os.Setenv("GIT_TERMINAL_PROMPT", "0")
 	var err error
 	lockProjects := &rawLock{}
 	if _, err = os.Stat(ManifestLockFile); os.IsNotExist(err) {
@@ -116,20 +125,30 @@ func main() {
 	close(ch)
 }
 
-func getTags(v rawProject) (versions, error) {
-	remote := v.Source
-	httpsRemote := ""
-	if remote == "" {
+func getSources(v rawProject) (sshSource, httpsRemote string, err error) {
+	sshSource = v.Source
+	if sshSource == "" {
 		httpsRemote = "https://" + v.Name
 		parsed, err := url.Parse(httpsRemote)
 		if err != nil {
-			return nil, fmt.Errorf("parsing error: %s", err)
+			return "", "", fmt.Errorf("parsing error: %s", err)
 		}
-		remote = "git@" + parsed.Host + ":" + parsed.Path[1:] + ".git"
+		sshSource = "git@" + parsed.Host + ":" + parsed.Path[1:] + ".git"
+	}
+	return
+}
+
+func getTags(v rawProject) (versions, error) {
+	sshRemote, httpsRemote, err := getSources(v)
+	if err != nil {
+		return nil, err
 	}
 	local, _ := ioutil.TempDir("", "go-vcs")
 	defer os.RemoveAll(local)
-	repo, err := getRepo(local, remote, httpsRemote)
+	repo, err := initRepo(local, sshRemote, httpsRemote)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get repo: %s", err)
+	}
 	tags, err := repo.Tags()
 	if err != nil {
 		return nil, fmt.Errorf("unable to get tags: %s", err)
@@ -144,13 +163,76 @@ func getTags(v rawProject) (versions, error) {
 	return vs, nil
 }
 
-func getRepo(tmpFolder, sshRemote, httpsFallback string) (vcs.Repo, error) {
-	repo, err := vcs.NewRepo(sshRemote, tmpFolder)
+var client = &http.Client{
+	Timeout: time.Second * 15,
+}
+
+func getMetaTag(https string) (remote string, err error) {
+	response, err := client.Get(https)
+	if err != nil {
+		return "", err
+	}
+
+	var redirectHTTPSRepo string
+	if response.StatusCode == http.StatusOK {
+		if n, err := xhttp.Parse(response.Body); err == nil {
+		SearchLoop:
+			for c := n.FirstChild; c != nil; c = c.NextSibling {
+				if c.Type == xhttp.ElementNode {
+					for c := c.FirstChild; c != nil; c = c.NextSibling {
+						if c.Type == xhttp.ElementNode && c.Data == "head" {
+							for c := c.FirstChild; c != nil; c = c.NextSibling {
+								if c.Data == "meta" {
+									lookHere := false
+									for _, a := range c.Attr {
+										if a.Key == "name" && a.Val == "go-import" {
+											lookHere = true
+										}
+									}
+									if lookHere {
+										fmt.Println("getMetaTag", https, c.Attr)
+										for _, a := range c.Attr {
+											if a.Key == "content" {
+												for _, s := range strings.Split(a.Val, " ") {
+													if strings.HasPrefix(s, "https://") {
+														redirectHTTPSRepo = s
+														if !strings.HasSuffix(s, ".git") && strings.Contains(a.Val, "git") {
+															redirectHTTPSRepo += ".git"
+														}
+														break SearchLoop
+													}
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+					break SearchLoop
+				}
+			}
+		}
+	}
+	return redirectHTTPSRepo, nil
+}
+
+func initRepo(tmpFolder, sshRemote, httpsFallback string) (vcs.Repo, error) {
+	remote, err := getMetaTag(httpsFallback)
+	if err != nil {
+		fmt.Println("error receiving meta tag", err)
+	}
+	if remote == "" {
+		remote = sshRemote
+	}
+	fmt.Println("load", remote)
+	repo, err := vcs.NewRepo(remote, tmpFolder)
 	if err != nil {
 		return nil, fmt.Errorf("unable to init vcs: %s", err)
 	}
 	err = repo.Get()
 	if err != nil {
+		fmt.Println("initRepo first err", err)
 		if strings.Contains(err.Error(), "Operation timed out") && httpsFallback != "" {
 			// fmt.Println("retrying with https", httpsFallback)
 			repo, err = vcs.NewRepo(httpsFallback, tmpFolder)
